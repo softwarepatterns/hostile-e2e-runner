@@ -1,0 +1,85 @@
+# Build and push the public hostile-e2e-runner image.
+name: Publish
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  BUILDKIT_PROGRESS: plain
+  DOCKER_CLI_HINTS: "false"
+
+jobs:
+  publish:
+    name: publish
+    runs-on: bookworm
+    steps:
+      - name: Environment
+        run: |
+          set -euo pipefail
+          systemctl start docker
+          echo "date_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Checkout
+        uses: https://forgejo.softwarepatterns.com/actions/checkout@v7
+
+      - name: Image tags
+        id: tags
+        run: |
+          set -euo pipefail
+          REGISTRY=forgejo.softwarepatterns.com
+          IMAGE="${REGISTRY}/softwarepatterns/hostile-e2e-runner"
+          SHORT_SHA="$(git rev-parse --short=7 HEAD)"
+          {
+            echo "image=${IMAGE}"
+            echo "sha_tag=${IMAGE}:${SHORT_SHA}"
+            echo "latest_tag=${IMAGE}:latest"
+          } >> "${GITHUB_OUTPUT}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            ver="${GITHUB_REF#refs/tags/}"
+            echo "version_tag=${IMAGE}:${ver}" >> "${GITHUB_OUTPUT}"
+          else
+            echo "version_tag=" >> "${GITHUB_OUTPUT}"
+          fi
+          echo "short_sha=${SHORT_SHA}"
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          docker build \
+            --progress=plain \
+            -t "${{ steps.tags.outputs.sha_tag }}" \
+            -t "${{ steps.tags.outputs.latest_tag }}" \
+            .
+          if [[ -n "${{ steps.tags.outputs.version_tag }}" ]]; then
+            docker tag "${{ steps.tags.outputs.sha_tag }}" "${{ steps.tags.outputs.version_tag }}"
+          fi
+
+      - name: Smoke
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v "${PWD}/examples/minimal:/e2e:ro" \
+            -w /e2e \
+            "${{ steps.tags.outputs.sha_tag }}" \
+            pytest -q
+
+      - name: Login and push
+        env:
+          # Public package still needs a push credential on this Forgejo.
+          PACKAGES_TOKEN: ${{ secrets.FORGEJO_PACKAGES_PAT }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PACKAGES_TOKEN:-}" ]]; then
+            echo "FORGEJO_PACKAGES_PAT secret missing — build+smoke only (no push)" >&2
+            exit 0
+          fi
+          echo "${PACKAGES_TOKEN}" | docker login forgejo.softwarepatterns.com \
+            -u softwarepatterns --password-stdin
+          docker push "${{ steps.tags.outputs.sha_tag }}"
+          docker push "${{ steps.tags.outputs.latest_tag }}"
+          if [[ -n "${{ steps.tags.outputs.version_tag }}" ]]; then
+            docker push "${{ steps.tags.outputs.version_tag }}"
+          fi
