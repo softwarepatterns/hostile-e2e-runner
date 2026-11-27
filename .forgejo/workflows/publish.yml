@@ -8,6 +8,10 @@
 #   Action secret SOPS_AGE_KEY  → decrypts committed .env.enc
 #   .env.enc holds FORGEJO_PACKAGES_PAT and optional FORGEJO_PACKAGES_USERNAME
 #   (default username: softwarepatterns)
+#
+# buildx builders live under $DOCKER_CONFIG. Ephemeral login uses a temp
+# DOCKER_CONFIG, so the multi-arch builder is created in that same step —
+# never in a prior step with the default config.
 name: Publish
 
 on:
@@ -83,19 +87,11 @@ jobs:
           fi
           echo "short_sha=${SHORT_SHA}"
 
-      - name: Multi-arch builder
+      - name: QEMU binfmt
         run: |
           set -euo pipefail
           # arm64 leg under QEMU on the amd64 box — allowed for this image only.
           docker run --privileged --rm tonistiigi/binfmt --install all
-          # docker-container driver can push multi-platform indexes; default
-          # "docker" driver cannot.
-          if ! docker buildx inspect hostile-multi >/dev/null 2>&1; then
-            docker buildx create --name hostile-multi --driver docker-container --use
-          else
-            docker buildx use hostile-multi
-          fi
-          docker buildx inspect --bootstrap
 
       - name: Build native (smoke)
         run: |
@@ -104,7 +100,6 @@ jobs:
           docker build \
             --progress=plain \
             -t "hostile-e2e-runner:smoke" \
-            -t "${{ steps.tags.outputs.sha_tag }}" \
             .
 
       - name: Smoke
@@ -125,8 +120,18 @@ jobs:
           DOCKER_CONFIG="$(mktemp -d)"
           export DOCKER_CONFIG
           trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
+
+          # Auth + buildx builder must share this DOCKER_CONFIG. A builder
+          # created under the default config is invisible here ("no builder
+          # found"). Plaintext auth in the temp config is expected; lifetime
+          # ends with the step (same contract as rust-builder).
           printf '%s' "${FORGEJO_PACKAGES_PAT}" | docker login forgejo.softwarepatterns.com \
             -u "${FORGEJO_PACKAGES_USERNAME}" --password-stdin
+
+          # docker-container driver can push multi-platform indexes; default
+          # "docker" driver cannot.
+          docker buildx create --name hostile-multi --driver docker-container --use
+          docker buildx inspect --bootstrap
 
           tags=(
             -t "${{ steps.tags.outputs.sha_tag }}"
