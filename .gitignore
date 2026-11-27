@@ -4,3 +4,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 *.egg-info/
+
+# Plaintext secrets — only .env.enc is committed (sops).
+.env
+!.env.enc

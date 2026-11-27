@@ -1,4 +1,9 @@
-# Build and push the public hostile-e2e-runner image.
+# Build, smoke, and push hostile-e2e-runner to the Forgejo OCI registry.
+#
+# Credentials (same contract as ironspecs/rust-builder):
+#   Action secret SOPS_AGE_KEY  → decrypts committed .env.enc
+#   .env.enc holds FORGEJO_PACKAGES_PAT and optional FORGEJO_PACKAGES_USERNAME
+#   (default username: softwarepatterns)
 name: Publish
 
 on:
@@ -21,9 +26,35 @@ jobs:
           set -euo pipefail
           systemctl start docker
           echo "date_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "sops: $(sops --version | head -n1)"
+          echo "age: $(age --version)"
 
       - name: Checkout
         uses: https://forgejo.softwarepatterns.com/actions/checkout@v7
+
+      - name: Load secrets
+        env:
+          SOPS_AGE_KEY: ${{ secrets.SOPS_AGE_KEY }}
+        run: |
+          set -euo pipefail
+          : "${SOPS_AGE_KEY:?missing Action secret SOPS_AGE_KEY}"
+          sops -d --input-type dotenv --output-type dotenv .env.enc \
+            > "${RUNNER_TEMP}/hostile-e2e-runner.env"
+          set -a
+          # shellcheck disable=SC1090
+          source "${RUNNER_TEMP}/hostile-e2e-runner.env"
+          set +a
+          : "${FORGEJO_PACKAGES_PAT:?FORGEJO_PACKAGES_PAT missing from .env.enc}"
+          FORGEJO_PACKAGES_USERNAME="${FORGEJO_PACKAGES_USERNAME:-softwarepatterns}"
+          echo "::add-mask::${FORGEJO_PACKAGES_PAT}"
+          {
+            echo "FORGEJO_PACKAGES_USERNAME<<EOF"
+            printf '%s\n' "${FORGEJO_PACKAGES_USERNAME}"
+            echo "EOF"
+            echo "FORGEJO_PACKAGES_PAT<<EOF"
+            printf '%s\n' "${FORGEJO_PACKAGES_PAT}"
+            echo "EOF"
+          } >> "${GITHUB_ENV}"
 
       - name: Image tags
         id: tags
@@ -67,19 +98,21 @@ jobs:
             pytest -q
 
       - name: Login and push
-        env:
-          # Public package still needs a push credential on this Forgejo.
-          PACKAGES_TOKEN: ${{ secrets.FORGEJO_PACKAGES_PAT }}
         run: |
           set -euo pipefail
-          if [[ -z "${PACKAGES_TOKEN:-}" ]]; then
-            echo "FORGEJO_PACKAGES_PAT secret missing — build+smoke only (no push)" >&2
-            exit 0
-          fi
-          echo "${PACKAGES_TOKEN}" | docker login forgejo.softwarepatterns.com \
-            -u softwarepatterns --password-stdin
+          : "${FORGEJO_PACKAGES_PAT:?}"
+          : "${FORGEJO_PACKAGES_USERNAME:?}"
+          # Ephemeral docker auth (same idea as rust-builder release-common.sh).
+          umask 077
+          DOCKER_CONFIG="$(mktemp -d)"
+          export DOCKER_CONFIG
+          trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
+          printf '%s' "${FORGEJO_PACKAGES_PAT}" | docker login forgejo.softwarepatterns.com \
+            -u "${FORGEJO_PACKAGES_USERNAME}" --password-stdin
           docker push "${{ steps.tags.outputs.sha_tag }}"
           docker push "${{ steps.tags.outputs.latest_tag }}"
           if [[ -n "${{ steps.tags.outputs.version_tag }}" ]]; then
             docker push "${{ steps.tags.outputs.version_tag }}"
           fi
+          echo "pushed ${{ steps.tags.outputs.sha_tag }}"
+          echo "pushed ${{ steps.tags.outputs.latest_tag }}"

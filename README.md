@@ -40,14 +40,26 @@ implementation language.
 forgejo.softwarepatterns.com/softwarepatterns/hostile-e2e-runner:latest
 ```
 
-(Publish tags from CI or local `docker build` + push. Pin a digest or version
-tag in product CI.)
+Also tagged `:&lt;7-char-sha&gt;` on every main push, and `:vX.Y.Z` when you push a
+version tag. Pin a digest or version tag in product CI.
 
 ### Build locally
 
 ```bash
 docker build -t hostile-e2e-runner:local .
 ```
+
+### Publish (OCI)
+
+Same credential shape as `ironspecs/rust-builder`:
+
+| Where | How |
+|---|---|
+| **CI** | Action secret `SOPS_AGE_KEY` decrypts committed `.env.enc` → `FORGEJO_PACKAGES_PAT` (+ optional `FORGEJO_PACKAGES_USERNAME`, default `softwarepatterns`). Workflow builds, smokes, logs in with an ephemeral `DOCKER_CONFIG`, pushes. |
+| **Laptop** | One-time: `sops -d --input-type dotenv --output-type dotenv .env.enc > .env && chmod 600 .env` then `docker login` + `docker push`. `.env` is gitignored; `.env.enc` is committed. |
+
+`.sops.yaml` lists the estate age recipients. Rotate keys there and re-encrypt
+`.env.enc` when the keyset changes.
 
 ### What’s inside
 
