@@ -40,26 +40,40 @@ implementation language.
 forgejo.softwarepatterns.com/softwarepatterns/hostile-e2e-runner:latest
 ```
 
-Also tagged `:&lt;7-char-sha&gt;` on every main push, and `:vX.Y.Z` when you push a
-version tag. Pin a digest or version tag in product CI.
+**Multi-arch OCI index:** `linux/amd64` + `linux/arm64`. `docker pull` resolves
+the host arch (laptop arm64 and box/CI amd64 both work). Also tagged
+`:<7-char-sha>` on every main push, and `:vX.Y.Z` on a version tag. Pin a
+digest or version tag in product CI.
+
+This is **not** the services-rs server-image law. Server/ship binaries stay
+native-only (no QEMU). This runner is a thin Python client; cross-building the
+arm64 leg under QEMU on the amd64 box is intentional and cheap.
 
 ### Build locally
 
 ```bash
 docker build -t hostile-e2e-runner:local .
+# optional multi-arch (needs buildx + binfmt):
+# docker buildx build --platform linux/amd64,linux/arm64 -t hostile-e2e-runner:local --load .
+# (--load is single-platform; use --push for a real multi-arch index)
 ```
 
 ### Publish (OCI)
 
-Same credential shape as `ironspecs/rust-builder`:
+Same credential shape as `ironspecs/rust-builder`, different arch model:
 
 | Where | How |
 |---|---|
-| **CI** | Action secret `SOPS_AGE_KEY` decrypts committed `.env.enc` → `FORGEJO_PACKAGES_PAT` (+ optional `FORGEJO_PACKAGES_USERNAME`, default `softwarepatterns`). Workflow builds, smokes, logs in with an ephemeral `DOCKER_CONFIG`, pushes. |
-| **Laptop** | One-time: `sops -d --input-type dotenv --output-type dotenv .env.enc > .env && chmod 600 .env` then `docker login` + `docker push`. `.env` is gitignored; `.env.enc` is committed. |
+| **CI** | Action secret `SOPS_AGE_KEY` decrypts committed `.env.enc` → `FORGEJO_PACKAGES_PAT` (+ optional `FORGEJO_PACKAGES_USERNAME`, default `softwarepatterns`). Native amd64 smoke, then `buildx --platform linux/amd64,linux/arm64 --push` with ephemeral `DOCKER_CONFIG`. |
+| **Laptop** | One-time: `sops -d --input-type dotenv --output-type dotenv .env.enc > .env && chmod 600 .env`. Local single-arch build is enough for dev; multi-arch publish is CI’s job. |
 
 `.sops.yaml` lists the estate age recipients. Rotate keys there and re-encrypt
 `.env.enc` when the keyset changes.
+
+| vs rust-builder | This image |
+|---|---|
+| Dual **native** hardware (box amd64 + Mac arm64), then cap index | One box job; arm64 via QEMU/buildx |
+| Emulation forbidden (aws-lc-rs) | Emulation fine (pip wheels) |
 
 ### What’s inside
 

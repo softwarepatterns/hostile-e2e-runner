@@ -2,6 +2,10 @@
 #
 # Python HTTP client only. Suites are mounted at runtime (volume preferred).
 # Never bake product source or product e2e trees into this image.
+#
+# Multi-arch OK (linux/amd64 + linux/arm64 via buildx/QEMU). Unlike
+# rust-builder / services-rs server images, this is not a ship binary and
+# does not hit aws-lc-rs — pip wheels cover both arches.
 FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="hostile-e2e-runner" \

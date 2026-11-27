@@ -1,4 +1,8 @@
-# Build, smoke, and push hostile-e2e-runner to the Forgejo OCI registry.
+# Build (multi-arch), smoke (native), push hostile-e2e-runner to Forgejo OCI.
+#
+# Architectures: linux/amd64 + linux/arm64 as one OCI index per tag.
+# Unlike rust-builder / services-rs server images, QEMU cross-build is fine
+# here (thin Python client; pip wheels for both arches). One job on the box.
 #
 # Credentials (same contract as ironspecs/rust-builder):
 #   Action secret SOPS_AGE_KEY  → decrypts committed .env.enc
@@ -15,6 +19,7 @@ on:
 env:
   BUILDKIT_PROGRESS: plain
   DOCKER_CLI_HINTS: "false"
+  PLATFORMS: linux/amd64,linux/arm64
 
 jobs:
   publish:
@@ -28,6 +33,8 @@ jobs:
           echo "date_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           echo "sops: $(sops --version | head -n1)"
           echo "age: $(age --version)"
+          echo "docker: $(docker version --format '{{.Server.Version}}' 2>/dev/null || docker version | head -n1)"
+          docker buildx version
 
       - name: Checkout
         uses: https://forgejo.softwarepatterns.com/actions/checkout@v7
@@ -76,17 +83,29 @@ jobs:
           fi
           echo "short_sha=${SHORT_SHA}"
 
-      - name: Build
+      - name: Multi-arch builder
         run: |
           set -euo pipefail
+          # arm64 leg under QEMU on the amd64 box — allowed for this image only.
+          docker run --privileged --rm tonistiigi/binfmt --install all
+          # docker-container driver can push multi-platform indexes; default
+          # "docker" driver cannot.
+          if ! docker buildx inspect hostile-multi >/dev/null 2>&1; then
+            docker buildx create --name hostile-multi --driver docker-container --use
+          else
+            docker buildx use hostile-multi
+          fi
+          docker buildx inspect --bootstrap
+
+      - name: Build native (smoke)
+        run: |
+          set -euo pipefail
+          # Single-platform load so we can docker run before pushing the index.
           docker build \
             --progress=plain \
+            -t "hostile-e2e-runner:smoke" \
             -t "${{ steps.tags.outputs.sha_tag }}" \
-            -t "${{ steps.tags.outputs.latest_tag }}" \
             .
-          if [[ -n "${{ steps.tags.outputs.version_tag }}" ]]; then
-            docker tag "${{ steps.tags.outputs.sha_tag }}" "${{ steps.tags.outputs.version_tag }}"
-          fi
 
       - name: Smoke
         run: |
@@ -94,25 +113,42 @@ jobs:
           docker run --rm \
             -v "${PWD}/examples/minimal:/e2e:ro" \
             -w /e2e \
-            "${{ steps.tags.outputs.sha_tag }}" \
+            hostile-e2e-runner:smoke \
             pytest -q
 
-      - name: Login and push
+      - name: Login and multi-arch push
         run: |
           set -euo pipefail
           : "${FORGEJO_PACKAGES_PAT:?}"
           : "${FORGEJO_PACKAGES_USERNAME:?}"
-          # Ephemeral docker auth (same idea as rust-builder release-common.sh).
           umask 077
           DOCKER_CONFIG="$(mktemp -d)"
           export DOCKER_CONFIG
           trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
           printf '%s' "${FORGEJO_PACKAGES_PAT}" | docker login forgejo.softwarepatterns.com \
             -u "${FORGEJO_PACKAGES_USERNAME}" --password-stdin
-          docker push "${{ steps.tags.outputs.sha_tag }}"
-          docker push "${{ steps.tags.outputs.latest_tag }}"
+
+          tags=(
+            -t "${{ steps.tags.outputs.sha_tag }}"
+            -t "${{ steps.tags.outputs.latest_tag }}"
+          )
           if [[ -n "${{ steps.tags.outputs.version_tag }}" ]]; then
-            docker push "${{ steps.tags.outputs.version_tag }}"
+            tags+=(-t "${{ steps.tags.outputs.version_tag }}")
           fi
-          echo "pushed ${{ steps.tags.outputs.sha_tag }}"
-          echo "pushed ${{ steps.tags.outputs.latest_tag }}"
+
+          # One OCI index per tag: amd64 (native) + arm64 (QEMU). --push is
+          # required for multi-platform; --load cannot materialize an index.
+          docker buildx build \
+            --builder hostile-multi \
+            --platform "${PLATFORMS}" \
+            --progress=plain \
+            "${tags[@]}" \
+            --push \
+            .
+
+          echo "pushed multi-arch (${PLATFORMS}):"
+          echo "  ${{ steps.tags.outputs.sha_tag }}"
+          echo "  ${{ steps.tags.outputs.latest_tag }}"
+          if [[ -n "${{ steps.tags.outputs.version_tag }}" ]]; then
+            echo "  ${{ steps.tags.outputs.version_tag }}"
+          fi
